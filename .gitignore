@@ -1,0 +1,12 @@
+build/
+*.o
+*.d
+*.su
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.cyclo
+*.a
+.cache/

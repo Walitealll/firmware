@@ -1,0 +1,15 @@
+{
+  "VsCodeTaskButtons.showCounter": false,
+  "VsCodeTaskButtons.tasks": [
+    {
+      "label": "$(tools) Build",
+      "task": "build",
+      "tooltip": "Собрать прошивку"
+    },
+    {
+      "label": "$(arrow-circle-down) Flash",
+      "task": "flash",
+      "tooltip": "Собрать и записать в МК"
+    }
+  ]
+}

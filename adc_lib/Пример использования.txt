@@ -1,0 +1,28 @@
+Пример использования для бесконечного получения данных с АЦП и отправки их в USB
+
+  while (1)
+  {
+
+	  start_emg(adc_buffer, &ADC_EMG, &TIMER_EMG);
+	  if(FLAG_ADC_COMPLETE) {
+
+		  choose_emg_values(adc_buffer, adc_buffer);
+		  /* по дефолту данные с АЦП в буффер adc_buffer кладутся в порядке Littile Endian
+		   следующий ниже цикл for переводит данные в Big endian */
+		  for (uint16_t i = 0; i < ADC_BUFFER_SIZE; i++) {
+		      tx_buffer[2 * i]     = (uint8_t)(adc_buffer[i] >> 8);
+		      tx_buffer[2 * i + 1] = (uint8_t)(adc_buffer[i] & 0xFF);
+		  }
+
+		  CDC_Transmit_FS((uint8_t*)tx_buffer, sizeof(uint16_t)*ADC_BUFFER_SIZE);
+		  stop_emg(&TIMER_EMG, &ADC_EMG);
+		  FLAG_ADC_COMPLETE = 0;
+	  }
+	  HAL_Delay(10);
+
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+  }
+  /* USER CODE END 3 */
+}
