@@ -215,6 +215,18 @@
 
 /* Регистр режима работы датчика. Пишется, чтобы войти в настройку и потом в рабочий режим. */
 #define FW_BNO_REG_OPR_MODE 0x3Du
+/* Страница и идентификатор для запуска датчика и проверки после RST_SYS. */
+#define FW_BNO_REG_PAGE_ID 0x07u
+#define FW_BNO_REG_CHIP_ID 0x00u
+#define FW_BNO_CHIP_ID 0xA0u
+/* CLK_SEL, бит 7 SYS_TRIGGER: 0 — внутренний генератор, 1 — внешний кварц 32,768 кГц.
+   Включать внешний можно только при наличии кварца на соответствующем BNO055. */
+#define FW_BNO_REG_SYS_TRIGGER 0x3Fu
+#define FW_BNO_CLK_EXT_MASK 0x80u
+#define FW_BNO_RST_SYS 0x20u
+/* Штатные генераторы обоих BNO, как в проверенном диагностическом запуске. */
+#define FW_BNO_USE_EXT_CRYSTAL_INT 0
+#define FW_BNO_USE_EXT_CRYSTAL_EXT 0
 /* Статус калибровки: SYS, GYR, ACC, MAG по два бита. 0 — нет, 3 — готово. */
 #define FW_BNO_REG_CALIB_STAT 0x35u
 /* Регистр питания. Отдельной записью ставится нормальный режим. */
@@ -270,40 +282,40 @@
 #define FW_BNO_PWR_NORMAL 0x00u
 /* Заводское значение единиц. Его же записываем и потом читаем обратно. */
 #define FW_BNO_UNIT_SEL 0x80u
+#define FW_BNO_UNIT_MASK 0x87u  /* Формат ориентации, Euler, GYR и ACC. */
 
-/* Сколько ждать после отпускания сброса, пока датчик выйдет в режим настройки. Это типичное время, не максимум. */
+/* Выдержка перед первым обращением к датчикам. */
 #define FW_BNO_TPOR_MS 650u
+/* Выдержки после RST_SYS и после подтверждения загрузки. */
+#define FW_BNO_RESET_DELAY_MS 700u
+#define FW_BNO_BOOT_SETTLE_MS 50u
+#define FW_BNO_BOOT_POLL_MS 10u
+#define FW_BNO_BOOT_TIMEOUT_MS 1000u
+/* Пауза после изменения питания или источника тактирования. */
+#define FW_BNO_CONFIG_WRITE_MS 10u
 /* Сколько ждать после команды «войти в настройку», прежде чем писать другие регистры. */
 #define FW_BNO_CONFIG_SWITCH_MS 19u
-/* Сколько ждать после команды «войти в рабочий режим», прежде чем проверять режим и кватернион. */
-#define FW_BNO_OPR_SWITCH_MS 7u
-/* Период, с которым датчик обновляет ориентацию. На инициализации с этим шагом ждём первый кватернион. */
+/* Выдержка CONFIG -> рабочий режим, как в Bosch BNO055 SensorAPI.
+   Раннее чтение через 7 мс на этой плате не подтверждало сохранение NDOF. */
+#define FW_BNO_OPR_SWITCH_MS 600u
+/* Одна повторная настройка, если после выдержки режим вернулся в CONFIG. */
+#define FW_BNO_MODE_RETRIES 1u
+/* Период, с которым датчик обновляет ориентацию. На инициализации с этим шагом опрашиваем статус. */
 #define FW_BNO_FUSION_PERIOD_MS 10u
-/* Сколько миллисекунд после входа в рабочий режим ждать первый ненулевой кватернион.
-   Отдельного срока в даташите нет: 7 мс — только смена режима. На столе двух периодов по 10 мс не хватило.
-   Предел равен типичному выходу после сброса, отдельное число не вводим. */
-#define FW_BNO_QUAT_WAIT_MS FW_BNO_TPOR_MS
-/* Пауза живого чтения кватерниона из главного цикла. Это не окно измерения 10 мс. */
+/* Дополнительный срок ожидания SYS_STATUS=5 после выдержки NDOF.
+   При опросе сохраняем фактические OPR_MODE/SYS_STATUS/SYS_ERR. */
+#define FW_BNO_FUSION_WAIT_MS 1000u
+/* Пауза живого чтения Euler из главного цикла. Это не окно измерения 10 мс. */
 #define FW_BNO_LIVE_MS 500u
 /* Сколько отсчётов регистра в единице кватерниона: 2^14. */
 #define FW_BNO_QUA_ONE 16384
 /* Байт состояния датчика. 5 — алгоритм ориентации уже считает. */
 #define FW_BNO_REG_SYS_STATUS 0x39u
+#define FW_BNO_SYS_ERROR 1u
 #define FW_BNO_SYS_FUSION 5u
 /* Байт ошибки. Имеет смысл, когда статус равен 1. В текст пишем его всё равно. */
 #define FW_BNO_REG_SYS_ERR 0x3Au
-/* В CALIB_STAT каждая пара бит: 0 — нет, 3 — готово. */
-#define FW_BNO_CALIB_MAX 3u
 
-/* Ось корпуса внутреннего датчика вдоль сгиба. TODO_HW: схемы монтажа нет.
-   0 — не задана и в угол не входит. Когда схема будет: 1 — X, 2 — Y, 3 — Z. */
-#define FW_BNO_FLEX_AXIS_INT 0
-/* То же для внешнего датчика. 0 — не ось X, число ещё не выбрано. */
-#define FW_BNO_FLEX_AXIS_EXT 0
-/* Знак оси внутреннего датчика. TODO_HW: 0 — не задан. Потом 1 или -1. */
-#define FW_BNO_FLEX_SIGN_INT 0
-/* Знак оси внешнего датчика. TODO_HW: 0 — не задан. Потом 1 или -1. */
-#define FW_BNO_FLEX_SIGN_EXT 0
 /* AXIS_MAP_CONFIG внутреннего, регистр 0x41. TODO_HW: 0 — в датчик не писать.
    Заводские 0x24 — сброс в P1, это не крепление на конечности. */
 #define FW_BNO_AXIS_MAP_CONFIG_INT 0
@@ -354,11 +366,14 @@
 #define FW_DIAG_CODE_PARAM "PARAM"       /* настройка BLE не принялась или чтение не совпало */
 #define FW_DIAG_CODE_MOD "MOD"           /* пин MOD не остался высоким, прозрачный режим выключен */
 #define FW_DIAG_CODE_I2C "I2C"           /* шина BNO: таймаут или ошибка чтения/записи */
-#define FW_DIAG_CODE_MODE "MODE"         /* BNO не остался в режиме IMU */
+#define FW_DIAG_CODE_MODE "MODE"         /* BNO не остался в выбранном режиме fusion */
+#define FW_DIAG_CODE_ID "ID"             /* по адресу отвечает не BNO055 */
+#define FW_DIAG_CODE_RESET "RESET"       /* BNO055 не вышел из программного сброса */
+#define FW_DIAG_CODE_CLOCK "CLOCK"       /* CLK_SEL не совпал с конфигурацией платы */
 #define FW_DIAG_CODE_UNIT "UNIT"         /* UNIT_SEL прочитался не тем, что записали */
-#define FW_DIAG_CODE_QUAT "QUAT"         /* кватернион два раза подряд нулевой */
+#define FW_DIAG_CODE_QUAT "QUAT"         /* прежний код проверки ненулевого кватерниона */
 #define FW_DIAG_CODE_MAP "MAP"           /* не два BNO или сброс не отличил внутренний от внешнего */
-/* SYS_STATUS после входа в IMU не равен 5. */
+/* SYS_STATUS после входа в fusion не равен 5, либо SYS_ERR ненулевой. */
 #define FW_DIAG_CODE_STATUS "STATUS"
 /* Байт в цифровой потенциометр не ушёл. */
 #define FW_DIAG_CODE_POT "POT"

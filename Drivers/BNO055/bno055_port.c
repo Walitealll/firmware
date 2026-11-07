@@ -1,5 +1,7 @@
 #include "bno055_port.h"
 
+#include <string.h>
+
 /* Активный датчик: библиотека ivyknob держит один порт и один адрес. */
 static fw_hw_i2c_bus_t s_bus;
 static uint8_t s_addr7;
@@ -27,7 +29,7 @@ void bno055_delay(int time)
 
 void bno055_writeData(uint8_t reg, uint8_t data)
 {
-  if (s_bus == 0u || s_addr7 == 0u) {
+  if (!s_io_ok || s_bus == 0u || s_addr7 == 0u) {
     s_io_ok = 0;
     return;
   }
@@ -38,11 +40,15 @@ void bno055_writeData(uint8_t reg, uint8_t data)
 
 void bno055_readData(uint8_t reg, uint8_t *data, uint8_t len)
 {
-  if (s_bus == 0u || s_addr7 == 0u || data == 0 || len == 0u) {
+  if (data != 0 && len != 0u) {
+    memset(data, 0, len);
+  }
+  if (!s_io_ok || s_bus == 0u || s_addr7 == 0u || data == 0 || len == 0u) {
     s_io_ok = 0;
     return;
   }
   if (fw_hw_i2c_read(s_bus, s_addr7, reg, data, len) != FW_HW_OK) {
+    memset(data, 0, len);
     s_io_ok = 0;
   }
 }

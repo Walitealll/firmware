@@ -90,7 +90,8 @@ static void report_bno(const char *name, const fw_bno_fact_t *fact)
   FW_diagnostics_puts(name);
   FW_diagnostics_puts(": ");
   if (fact->fail == FW_BNO_FAIL_COUNT) {
-    FW_diagnostics_puts("sensor did not answer\r\n");
+    FW_diagnostics_puts(fact->addr_probe_mask != 0u ?
+      "both I2C addresses answered\r\n" : "sensor did not answer\r\n");
     return;
   }
   if (fact->fail == FW_BNO_FAIL_I2C && fact->bus == 0u) {
@@ -110,6 +111,22 @@ static void report_bno(const char *name, const fw_bno_fact_t *fact)
     return;
   }
   FW_diagnostics_puts(", I2C ok");
+  if (fact->fail == FW_BNO_FAIL_ID) {
+    FW_diagnostics_puts(", CHIP_ID is not 0xA0\r\n");
+    return;
+  }
+  if (fact->fail == FW_BNO_FAIL_RESET) {
+    FW_diagnostics_puts(", software reset failed\r\n");
+    return;
+  }
+  if (fact->fail == FW_BNO_FAIL_CLOCK) {
+    FW_diagnostics_puts(", clock setup failed, SYS_TRIGGER 0x");
+    FW_diagnostics_puthex2(fact->sys_trigger);
+    FW_diagnostics_puts(", waited ms ");
+    FW_diagnostics_putu(fact->clock_wait_ms);
+    FW_diagnostics_puts("\r\n");
+    return;
+  }
   if (fact->fail == FW_BNO_FAIL_PWR) {
     FW_diagnostics_puts(", power is not NORMAL\r\n");
     return;
@@ -130,11 +147,11 @@ static void report_bno(const char *name, const fw_bno_fact_t *fact)
   }
   FW_diagnostics_puts(", mode NDOF, power NORMAL, units ");
   FW_diagnostics_putu(fact->unit);
+  FW_diagnostics_puts((fact->sys_trigger & FW_BNO_CLK_EXT_MASK) != 0u ? ", clock external" : ", clock internal");
   if (fact->fail == FW_BNO_FAIL_QUAT) {
     FW_diagnostics_puts(", no orientation\r\n");
     return;
   }
-  FW_diagnostics_puts(", orientation ok");
   if (fact->fail == FW_BNO_FAIL_STATUS_IO) {
     FW_diagnostics_puts(", status not read\r\n");
     return;
@@ -143,6 +160,9 @@ static void report_bno(const char *name, const fw_bno_fact_t *fact)
   FW_diagnostics_putu(fact->sys_status);
   FW_diagnostics_puts(", SYS_ERR ");
   FW_diagnostics_putu(fact->sys_err);
+  if (fact->fail == FW_BNO_FAIL_NONE) {
+    FW_diagnostics_puts(", Euler read ok");
+  }
   FW_diagnostics_puts("\r\n");
 }
 

@@ -11,9 +11,10 @@ uint16_t quaScale = (1<<14);    // 2^14
 void bno055_setPage(uint8_t page) { bno055_writeData(BNO055_PAGE_ID, page); }
 
 bno055_opmode_t bno055_getOperationMode() {
-  bno055_opmode_t mode;
+  uint8_t mode = BNO055_OPERATION_MODE_CONFIG;
+  bno055_setPage(0);
   bno055_readData(BNO055_OPR_MODE, &mode, 1);
-  return mode;
+  return (bno055_opmode_t)(mode & 0x0F);
 }
 
 void bno055_setOperationMode(bno055_opmode_t mode) {
@@ -37,7 +38,7 @@ void bno055_setExternalCrystalUse(bool state) {
   bno055_setPage(0);
   uint8_t tmp = 0;
   bno055_readData(BNO055_SYS_TRIGGER, &tmp, 1);
-  tmp |= (state == true) ? 0x80 : 0x0;
+  tmp = (uint8_t)((tmp & 0x7F) | (state ? 0x80 : 0x00));
   bno055_writeData(BNO055_SYS_TRIGGER, tmp);
   bno055_delay(700);
 }
@@ -46,6 +47,8 @@ void bno055_enableExternalCrystal() { bno055_setExternalCrystalUse(true); }
 void bno055_disableExternalCrystal() { bno055_setExternalCrystalUse(false); }
 
 void bno055_reset() {
+  bno055_setPage(0);
+  bno055_setOperationModeConfig();
   bno055_writeData(BNO055_SYS_TRIGGER, 0x20);
   bno055_delay(700);
 }
@@ -169,15 +172,7 @@ void bno055_setCalibrationData(bno055_calibration_data_t calData) {
   bno055_setOperationMode(operationMode);
 }
 
-bno055_vector_t bno055_getVector(uint8_t vec) {
-  bno055_setPage(0);
-  uint8_t buffer[8];    // Quaternion need 8 bytes
-
-  if (vec == BNO055_VECTOR_QUATERNION)
-    bno055_readData(vec, buffer, 8);
-  else
-    bno055_readData(vec, buffer, 6);
-
+static bno055_vector_t decode_vector(uint8_t vec, const uint8_t *buffer) {
   double scale = 1;
 
   if (vec == BNO055_VECTOR_MAGNETOMETER) {
@@ -206,6 +201,13 @@ bno055_vector_t bno055_getVector(uint8_t vec) {
   }
 
   return xyz;
+}
+
+bno055_vector_t bno055_getVector(uint8_t vec) {
+  uint8_t buffer[8] = {0};
+  bno055_setPage(0);
+  bno055_readData(vec, buffer, vec == BNO055_VECTOR_QUATERNION ? 8 : 6);
+  return decode_vector(vec, buffer);
 }
 
 bno055_vector_t bno055_getVectorAccelerometer() {

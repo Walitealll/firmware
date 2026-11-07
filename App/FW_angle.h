@@ -14,6 +14,9 @@
 #define FW_BNO_FAIL_STATUS_IO 7u
 #define FW_BNO_FAIL_COUNT 8u
 #define FW_BNO_FAIL_MAP 9u
+#define FW_BNO_FAIL_ID 10u
+#define FW_BNO_FAIL_RESET 11u
+#define FW_BNO_FAIL_CLOCK 12u
 
 /* Что инициализация узнала об одном датчике. Нужно тексту на ПК, не расчёту угла. */
 typedef struct {
@@ -24,6 +27,14 @@ typedef struct {
   uint8_t sys_status;
   uint8_t sys_err;
   uint8_t fail;
+  uint8_t chip_id;
+  uint8_t opr_mode;
+  uint8_t pwr_mode;
+  uint8_t sys_trigger; /* бит 7: выбран внешний кварц. */
+  uint16_t clock_wait_ms; /* Выдержка после команды выбора часов. */
+  int8_t reset_write_status; /* ответ транспорта на RST_SYS; готовность проверяется отдельно. */
+  uint8_t mode_retries; /* повторная настройка после возврата NDOF -> CONFIG при запуске. */
+  uint8_t addr_probe_mask; /* Последний поиск на I2C1. Биты 0 и 1 соответствуют 0x28 и 0x29. */
 } fw_bno_fact_t;
 
 /* Углы Эйлера одной платы, градусы. Live Watch, в кадр не входят. */
@@ -48,18 +59,18 @@ extern volatile fw_bno_calib_t g_calib_internal;
 extern volatile fw_bno_calib_t g_calib_external;
 
 /* После BLE: оба BNO в FW_BNO_OPR_ACTIVE (NDOF), UNIT_SEL и SYS_STATUS=5.
-   module/code при ошибке. 0 — оба готовы. */
+   module/code при ошибке. 0 — fusion запущен; калибровка продолжается в фоне. */
 int FW_angle_init(const char **module, const char **code);
 void FW_angle_facts(fw_bno_fact_t *internal, fw_bno_fact_t *external);
 
 void FW_angle_meas_begin(void);
 void FW_angle_meas_end(void);
 
-/* Окно 10 мс: |heading_ext − heading_int| → десятые градуса 0…1800. В кадр пишет sync.
-   0 — угол записан. -1 — датчик не ответил. */
+/* Окно 10 мс. Кратчайшая разность heading двух BNO в десятых градуса (0…1800).
+   Возвращает 0 после чтения обоих Euler, при ошибке чтения оставляет угол нетронутым. */
 int FW_angle_window(uint16_t *angle_x10);
 
-/* Вне MEASUREMENT раз в FW_BNO_LIVE_MS обновляет Live Watch (эйлер + calib). */
+/* Вне MEASUREMENT обновляет Euler и калибровку раз в FW_BNO_LIVE_MS. */
 void FW_angle_poll(void);
 
 #endif /* FW_ANGLE_H */

@@ -1,0 +1,525 @@
+diff --git a/App/FW_angle.c b/App/FW_angle.c
+index 7a220c1..d3082b2 100644
+--- a/App/FW_angle.c
++++ b/App/FW_angle.c
+@@ -155,47 +155,120 @@ static int heading_diff_deg(float *deg)
+   return 0;
+ }
+ 
+-static int orientation_present(fw_hw_i2c_bus_t bus, uint8_t addr)
++static int reset_sensor(fw_hw_i2c_bus_t bus, uint8_t addr, fw_bno_fact_t *fact, const char **code)
+ {
+-  bno055_vector_t v;
++  uint32_t started;
++  uint8_t opr = 0u;
+ 
+-  bno055_select(bus, addr);
+-  v = bno055_getVectorEuler();
+-  if (!bno055_io_ok()) {
+-    return 0;
++  if (write_masked(bus, addr, FW_BNO_REG_OPR_MODE, FW_BNO_OPR_MODE_MASK, FW_BNO_OPR_CONFIG, code) != 0) {
++    fact->fail = FW_BNO_FAIL_MODE;
++    return -1;
++  }
++  fw_hw_delay_ms(FW_BNO_CONFIG_SWITCH_MS);
++
++  /* RST_SYS перезапускает и I2C-часть BNO. Ответ этой единственной записи
++     не доказывает успех/неуспех сброса: после паузы проверяем сам чип.
++     Не пропускаем RST_SYS через sticky-ошибку библиотеки, иначе потерянный
++     ACK блокирует даже чтение CHIP_ID после завершения загрузки. */
++  fact->reset_write_status = (int8_t)fw_hw_i2c_write_reg(bus, addr, FW_BNO_REG_SYS_TRIGGER, FW_BNO_RST_SYS);
++  fw_hw_delay_ms(FW_BNO_RESET_DELAY_MS);
++  started = fw_hw_tick_ms();
++  for (;;) {
++    if (fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_CHIP_ID, &fact->chip_id) == FW_HW_OK &&
++        fact->chip_id == FW_BNO_CHIP_ID &&
++        fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_OPR_MODE, &opr) == FW_HW_OK &&
++        (opr & FW_BNO_OPR_MODE_MASK) == FW_BNO_OPR_CONFIG) {
++      fw_hw_delay_ms(FW_BNO_BOOT_SETTLE_MS);
++      return 0;
++    }
++    if ((fw_hw_tick_ms() - started) >= FW_BNO_BOOT_TIMEOUT_MS) {
++      fact->fail = FW_BNO_FAIL_RESET;
++      *code = FW_DIAG_CODE_RESET;
++      return -1;
++    }
++    fw_hw_delay_ms(FW_BNO_BOOT_POLL_MS);
+   }
+-  /* После CONFIG нули; любой ненулевой Эйлер — fusion уже отдаёт ориентацию. */
+-  return (v.x != 0.0 || v.y != 0.0 || v.z != 0.0) ? 1 : 0;
+ }
+ 
+-static int config_sensor(fw_hw_i2c_bus_t bus, uint8_t addr, fw_bno_fact_t *fact, const char **code)
++static int start_fusion(fw_hw_i2c_bus_t bus, uint8_t addr, fw_bno_fact_t *fact, const char **code)
+ {
+   uint8_t unit = 0;
+   uint8_t opr = 0;
++  uint8_t pwr = 0;
++  uint8_t trigger = 0;
++  uint8_t use_ext_crystal;
+   volatile fw_bno_calib_t *calib;
+-  uint32_t waited = 0;
++  volatile fw_bno_eul_t *eul;
++  uint32_t started;
+ 
+   if (bus == (fw_hw_i2c_bus_t)FW_BNO_BUS_INT) {
+     calib = &g_calib_internal;
++    eul = &g_eul_internal;
++    use_ext_crystal = FW_BNO_USE_EXT_CRYSTAL_INT;
+   } else {
+     calib = &g_calib_external;
++    eul = &g_eul_external;
++    use_ext_crystal = FW_BNO_USE_EXT_CRYSTAL_EXT;
+   }
+ 
+-  if (fw_hw_i2c_probe(bus, addr) != FW_HW_OK) {
++  if (fw_hw_i2c_write_reg(bus, addr, FW_BNO_REG_PAGE_ID, 0u) != FW_HW_OK) {
+     fact->fail = FW_BNO_FAIL_I2C;
+     *code = FW_DIAG_CODE_I2C;
+     return -1;
+   }
++  /* CONFIG задается заново и после сброса, и при единственной повторной
++     настройке. Сброс BNO здесь не выполняется: он снова потерял бы настройки. */
+   if (write_masked(bus, addr, FW_BNO_REG_OPR_MODE, FW_BNO_OPR_MODE_MASK, FW_BNO_OPR_CONFIG, code) != 0) {
+-    fact->fail = FW_BNO_FAIL_MODE;
++    fact->fail = FW_BNO_FAIL_I2C;
+     return -1;
+   }
+   fw_hw_delay_ms(FW_BNO_CONFIG_SWITCH_MS);
+ 
++  /* Как в setup библиотеки: внутренний генератор, без повторной команды сброса. */
++  if (fw_hw_i2c_write_reg(bus, addr, FW_BNO_REG_SYS_TRIGGER, 0u) != FW_HW_OK) {
++    fact->fail = FW_BNO_FAIL_CLOCK;
++    *code = FW_DIAG_CODE_I2C;
++    return -1;
++  }
++  fw_hw_delay_ms(FW_BNO_CONFIG_WRITE_MS);
++  /* Внешний включаем только явно для этой платы. */
++  if (use_ext_crystal != 0u) {
++    bno055_select(bus, addr);
++    bno055_enableExternalCrystal();
++    if (!bno055_io_ok()) {
++      fact->fail = FW_BNO_FAIL_CLOCK;
++      *code = FW_DIAG_CODE_I2C;
++      return -1;
++    }
++  }
++  if (fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_SYS_TRIGGER, &trigger) != FW_HW_OK) {
++    fact->fail = FW_BNO_FAIL_CLOCK;
++    *code = FW_DIAG_CODE_I2C;
++    return -1;
++  }
++  fact->sys_trigger = trigger;
++  if ((trigger & FW_BNO_CLK_EXT_MASK) != (use_ext_crystal ? FW_BNO_CLK_EXT_MASK : 0u)) {
++    fact->fail = FW_BNO_FAIL_CLOCK;
++    *code = FW_DIAG_CODE_CLOCK;
++    return -1;
++  }
++
+   if (write_masked(bus, addr, FW_BNO_REG_PWR_MODE, FW_BNO_PWR_MODE_MASK, FW_BNO_PWR_NORMAL, code) != 0) {
+     fact->fail = FW_BNO_FAIL_PWR;
+     return -1;
+   }
++  fw_hw_delay_ms(FW_BNO_CONFIG_WRITE_MS);
++  if (fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_PWR_MODE, &pwr) != FW_HW_OK) {
++    fact->fail = FW_BNO_FAIL_PWR;
++    *code = FW_DIAG_CODE_I2C;
++    return -1;
++  }
++  fact->pwr_mode = pwr;
++  if ((pwr & FW_BNO_PWR_MODE_MASK) != FW_BNO_PWR_NORMAL) {
++    fact->fail = FW_BNO_FAIL_PWR;
++    *code = FW_DIAG_CODE_MODE;
++    return -1;
++  }
+   if (fw_hw_i2c_write_reg(bus, addr, FW_BNO_REG_UNIT_SEL, FW_BNO_UNIT_SEL) != FW_HW_OK) {
+     fact->fail = FW_BNO_FAIL_UNIT;
+     *code = FW_DIAG_CODE_I2C;
+@@ -215,49 +288,92 @@ static int config_sensor(fw_hw_i2c_bus_t bus, uint8_t addr, fw_bno_fact_t *fact,
+   }
+ 
+   if (write_masked(bus, addr, FW_BNO_REG_OPR_MODE, FW_BNO_OPR_MODE_MASK, FW_BNO_OPR_ACTIVE, code) != 0) {
+-    fact->fail = FW_BNO_FAIL_MODE;
++    fact->fail = FW_BNO_FAIL_I2C;
+     return -1;
+   }
+   fw_hw_delay_ms(FW_BNO_OPR_SWITCH_MS);
+-  if (fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_OPR_MODE, &opr) != FW_HW_OK) {
+-    fact->fail = FW_BNO_FAIL_MODE;
+-    *code = FW_DIAG_CODE_I2C;
+-    return -1;
+-  }
+-  if ((opr & FW_BNO_OPR_MODE_MASK) != FW_BNO_OPR_ACTIVE) {
+-    fact->fail = FW_BNO_FAIL_MODE;
+-    *code = FW_DIAG_CODE_MODE;
+-    return -1;
+-  }
+ 
+-  while (waited < FW_BNO_QUAT_WAIT_MS) {
++  started = fw_hw_tick_ms();
++  while ((fw_hw_tick_ms() - started) < FW_BNO_FUSION_WAIT_MS) {
+     uint8_t st = 0;
+     uint8_t er = 0;
+ 
+-    fw_hw_delay_ms(FW_BNO_FUSION_PERIOD_MS);
+-    waited += FW_BNO_FUSION_PERIOD_MS;
+-    if (!orientation_present(bus, addr)) {
+-      continue;
+-    }
+-    if (fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_SYS_STATUS, &st) != FW_HW_OK ||
++    /* Статус читается независимо от значений вектора. Нули в Euler допустимы,
++       а раннее успешное чтение OPR_MODE не доказывает сохранение режима. */
++    if (fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_OPR_MODE, &opr) != FW_HW_OK ||
++        fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_SYS_STATUS, &st) != FW_HW_OK ||
+         fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_SYS_ERR, &er) != FW_HW_OK) {
+       fact->fail = FW_BNO_FAIL_STATUS_IO;
+       *code = FW_DIAG_CODE_I2C;
+       return -1;
+     }
++    fact->opr_mode = opr;
+     fact->sys_status = st;
+     fact->sys_err = er;
+-    if (st != FW_BNO_SYS_FUSION) {
++    if (st == FW_BNO_SYS_ERROR || er != 0u) {
+       fact->fail = FW_BNO_FAIL_STATUS;
+       *code = FW_DIAG_CODE_STATUS;
+       return -1;
+     }
++    if ((opr & FW_BNO_OPR_MODE_MASK) != FW_BNO_OPR_ACTIVE) {
++      fact->fail = FW_BNO_FAIL_MODE;
++      *code = FW_DIAG_CODE_MODE;
++      return -1;
++    }
++    if (st != FW_BNO_SYS_FUSION) {
++      fw_hw_delay_ms(FW_BNO_FUSION_PERIOD_MS);
++      continue;
++    }
++    /* Проверять тот же выход, который читается при измерениях, как в простом
++       примере библиотеки. Дополнительного условия «кватернион не нулевой» нет. */
++    if (euler_store(bus, addr, eul) != 0) {
++      fact->fail = FW_BNO_FAIL_I2C;
++      *code = FW_DIAG_CODE_I2C;
++      return -1;
++    }
+     (void)calib_store(bus, addr, calib);
+     fact->fail = FW_BNO_FAIL_NONE;
+     return 0;
+   }
+-  fact->fail = FW_BNO_FAIL_QUAT;
+-  *code = FW_DIAG_CODE_QUAT;
++  fact->fail = FW_BNO_FAIL_STATUS;
++  *code = FW_DIAG_CODE_STATUS;
++  return -1;
++}
++
++static int config_sensor(fw_hw_i2c_bus_t bus, uint8_t addr, fw_bno_fact_t *fact, const char **code)
++{
++  unsigned attempt;
++
++  if (fw_hw_i2c_probe(bus, addr) != FW_HW_OK ||
++      fw_hw_i2c_write_reg(bus, addr, FW_BNO_REG_PAGE_ID, 0u) != FW_HW_OK ||
++      fw_hw_i2c_read_reg(bus, addr, FW_BNO_REG_CHIP_ID, &fact->chip_id) != FW_HW_OK) {
++    fact->fail = FW_BNO_FAIL_I2C;
++    *code = FW_DIAG_CODE_I2C;
++    return -1;
++  }
++  if (fact->chip_id != FW_BNO_CHIP_ID) {
++    fact->fail = FW_BNO_FAIL_ID;
++    *code = FW_DIAG_CODE_ID;
++    return -1;
++  }
++  /* Сброс STM32 через отладчик не гарантирует сброс отдельно питаемого BNO. */
++  if (reset_sensor(bus, addr, fact, code) != 0) {
++    return -1;
++  }
++
++  for (attempt = 0u; attempt <= FW_BNO_MODE_RETRIES; attempt++) {
++    fact->mode_retries = (uint8_t)attempt;
++    if (start_fusion(bus, addr, fact, code) == 0) {
++      return 0;
++    }
++    /* На плате наблюдалось 0x0C -> 0x10, SYS_STATUS=0; поздняя запись NDOF
++       запускала fusion. Только этот возврат в CONFIG допускает повторную
++       настройку. Ошибки I2C, SYS_ERR и другие режимы не скрываются повтором. */
++    if (fact->fail != FW_BNO_FAIL_MODE ||
++        (fact->opr_mode & FW_BNO_OPR_MODE_MASK) != FW_BNO_OPR_CONFIG) {
++      return -1;
++    }
++  }
+   return -1;
+ }
+ 
+@@ -280,13 +396,15 @@ int FW_angle_init(const char **module, const char **code)
+ 
+   *module = FW_DIAG_MODULE_ANGLE_INT;
+   *code = FW_DIAG_CODE_MAP;
+-  s_fact_int.bus = 0u;
+-  s_fact_int.addr7 = 0u;
+-  s_fact_int.unit_known = 0u;
++  g_bno_internal = (fw_bno_hit_t){0};
++  g_bno_external = (fw_bno_hit_t){0};
++  g_eul_internal = (fw_bno_eul_t){0};
++  g_eul_external = (fw_bno_eul_t){0};
++  g_calib_internal = (fw_bno_calib_t){0};
++  g_calib_external = (fw_bno_calib_t){0};
++  s_fact_int = (fw_bno_fact_t){0};
++  s_fact_ext = (fw_bno_fact_t){0};
+   s_fact_int.fail = FW_BNO_FAIL_MAP;
+-  s_fact_ext.bus = 0u;
+-  s_fact_ext.addr7 = 0u;
+-  s_fact_ext.unit_known = 0u;
+   s_fact_ext.fail = FW_BNO_FAIL_MAP;
+ 
+   if (!fw_hw_i2c_ready()) {
+diff --git a/App/FW_angle.h b/App/FW_angle.h
+index c962cf1..4548f62 100644
+--- a/App/FW_angle.h
++++ b/App/FW_angle.h
+@@ -14,6 +14,9 @@
+ #define FW_BNO_FAIL_STATUS_IO 7u
+ #define FW_BNO_FAIL_COUNT 8u
+ #define FW_BNO_FAIL_MAP 9u
++#define FW_BNO_FAIL_ID 10u
++#define FW_BNO_FAIL_RESET 11u
++#define FW_BNO_FAIL_CLOCK 12u
+ 
+ /* Что инициализация узнала об одном датчике. Нужно тексту на ПК, не расчёту угла. */
+ typedef struct {
+@@ -24,6 +27,12 @@ typedef struct {
+   uint8_t sys_status;
+   uint8_t sys_err;
+   uint8_t fail;
++  uint8_t chip_id;
++  uint8_t opr_mode;
++  uint8_t pwr_mode;
++  uint8_t sys_trigger; /* бит 7: выбран внешний кварц. */
++  int8_t reset_write_status; /* ответ транспорта на RST_SYS; готовность проверяется отдельно. */
++  uint8_t mode_retries; /* повторная настройка после возврата NDOF -> CONFIG при запуске. */
+ } fw_bno_fact_t;
+ 
+ /* Углы Эйлера одной платы, градусы. Live Watch, в кадр не входят. */
+diff --git a/App/FW_init.c b/App/FW_init.c
+index e46ce89..01067a4 100644
+--- a/App/FW_init.c
++++ b/App/FW_init.c
+@@ -110,6 +110,18 @@ static void report_bno(const char *name, const fw_bno_fact_t *fact)
+     return;
+   }
+   FW_diagnostics_puts(", I2C ok");
++  if (fact->fail == FW_BNO_FAIL_ID) {
++    FW_diagnostics_puts(", CHIP_ID is not 0xA0\r\n");
++    return;
++  }
++  if (fact->fail == FW_BNO_FAIL_RESET) {
++    FW_diagnostics_puts(", software reset failed\r\n");
++    return;
++  }
++  if (fact->fail == FW_BNO_FAIL_CLOCK) {
++    FW_diagnostics_puts(", clock setup failed\r\n");
++    return;
++  }
+   if (fact->fail == FW_BNO_FAIL_PWR) {
+     FW_diagnostics_puts(", power is not NORMAL\r\n");
+     return;
+@@ -130,11 +142,11 @@ static void report_bno(const char *name, const fw_bno_fact_t *fact)
+   }
+   FW_diagnostics_puts(", mode NDOF, power NORMAL, units ");
+   FW_diagnostics_putu(fact->unit);
++  FW_diagnostics_puts((fact->sys_trigger & FW_BNO_CLK_EXT_MASK) != 0u ? ", clock external" : ", clock internal");
+   if (fact->fail == FW_BNO_FAIL_QUAT) {
+     FW_diagnostics_puts(", no orientation\r\n");
+     return;
+   }
+-  FW_diagnostics_puts(", orientation ok");
+   if (fact->fail == FW_BNO_FAIL_STATUS_IO) {
+     FW_diagnostics_puts(", status not read\r\n");
+     return;
+@@ -143,6 +155,9 @@ static void report_bno(const char *name, const fw_bno_fact_t *fact)
+   FW_diagnostics_putu(fact->sys_status);
+   FW_diagnostics_puts(", SYS_ERR ");
+   FW_diagnostics_putu(fact->sys_err);
++  if (fact->fail == FW_BNO_FAIL_NONE) {
++    FW_diagnostics_puts(", Euler read ok");
++  }
+   FW_diagnostics_puts("\r\n");
+ }
+ 
+diff --git a/Drivers/BNO055/bno055.c b/Drivers/BNO055/bno055.c
+index 0a3c2c6..2404413 100644
+--- a/Drivers/BNO055/bno055.c
++++ b/Drivers/BNO055/bno055.c
+@@ -11,9 +11,10 @@ uint16_t quaScale = (1<<14);    // 2^14
+ void bno055_setPage(uint8_t page) { bno055_writeData(BNO055_PAGE_ID, page); }
+ 
+ bno055_opmode_t bno055_getOperationMode() {
+-  bno055_opmode_t mode;
++  uint8_t mode = BNO055_OPERATION_MODE_CONFIG;
++  bno055_setPage(0);
+   bno055_readData(BNO055_OPR_MODE, &mode, 1);
+-  return mode;
++  return (bno055_opmode_t)(mode & 0x0F);
+ }
+ 
+ void bno055_setOperationMode(bno055_opmode_t mode) {
+@@ -37,7 +38,7 @@ void bno055_setExternalCrystalUse(bool state) {
+   bno055_setPage(0);
+   uint8_t tmp = 0;
+   bno055_readData(BNO055_SYS_TRIGGER, &tmp, 1);
+-  tmp |= (state == true) ? 0x80 : 0x0;
++  tmp = (uint8_t)((tmp & 0x7F) | (state ? 0x80 : 0x00));
+   bno055_writeData(BNO055_SYS_TRIGGER, tmp);
+   bno055_delay(700);
+ }
+@@ -46,6 +47,8 @@ void bno055_enableExternalCrystal() { bno055_setExternalCrystalUse(true); }
+ void bno055_disableExternalCrystal() { bno055_setExternalCrystalUse(false); }
+ 
+ void bno055_reset() {
++  bno055_setPage(0);
++  bno055_setOperationModeConfig();
+   bno055_writeData(BNO055_SYS_TRIGGER, 0x20);
+   bno055_delay(700);
+ }
+@@ -171,7 +174,7 @@ void bno055_setCalibrationData(bno055_calibration_data_t calData) {
+ 
+ bno055_vector_t bno055_getVector(uint8_t vec) {
+   bno055_setPage(0);
+-  uint8_t buffer[8];    // Quaternion need 8 bytes
++  uint8_t buffer[8] = {0};    // Quaternion need 8 bytes
+ 
+   if (vec == BNO055_VECTOR_QUATERNION)
+     bno055_readData(vec, buffer, 8);
+diff --git a/Drivers/BNO055/bno055_port.c b/Drivers/BNO055/bno055_port.c
+index 41b7ffd..82551b7 100644
+--- a/Drivers/BNO055/bno055_port.c
++++ b/Drivers/BNO055/bno055_port.c
+@@ -1,5 +1,7 @@
+ #include "bno055_port.h"
+ 
++#include <string.h>
++
+ /* Активный датчик: библиотека ivyknob держит один порт и один адрес. */
+ static fw_hw_i2c_bus_t s_bus;
+ static uint8_t s_addr7;
+@@ -27,7 +29,7 @@ void bno055_delay(int time)
+ 
+ void bno055_writeData(uint8_t reg, uint8_t data)
+ {
+-  if (s_bus == 0u || s_addr7 == 0u) {
++  if (!s_io_ok || s_bus == 0u || s_addr7 == 0u) {
+     s_io_ok = 0;
+     return;
+   }
+@@ -38,11 +40,15 @@ void bno055_writeData(uint8_t reg, uint8_t data)
+ 
+ void bno055_readData(uint8_t reg, uint8_t *data, uint8_t len)
+ {
+-  if (s_bus == 0u || s_addr7 == 0u || data == 0 || len == 0u) {
++  if (data != 0 && len != 0u) {
++    memset(data, 0, len);
++  }
++  if (!s_io_ok || s_bus == 0u || s_addr7 == 0u || data == 0 || len == 0u) {
+     s_io_ok = 0;
+     return;
+   }
+   if (fw_hw_i2c_read(s_bus, s_addr7, reg, data, len) != FW_HW_OK) {
++    memset(data, 0, len);
+     s_io_ok = 0;
+   }
+ }
+diff --git a/Drivers/BNO055/bno055_port.h b/Drivers/BNO055/bno055_port.h
+index 9fac0f2..486bf8e 100644
+--- a/Drivers/BNO055/bno055_port.h
++++ b/Drivers/BNO055/bno055_port.h
+@@ -12,7 +12,8 @@ extern "C" {
+    Библиотека рассчитана на один датчик — для пары BNO переключаем перед каждым чтением. */
+ void bno055_select(fw_hw_i2c_bus_t bus, uint8_t addr7);
+ 
+-/* 1 — последняя запись/чтение I2C в библиотеке прошли без ошибки. 0 — сбой. */
++/* 1 — все операции после select прошли без ошибки. Первый сбой блокирует
++   оставшиеся операции до следующего select, чтобы не работать с неверной страницей. */
+ int bno055_io_ok(void);
+ 
+ #ifdef __cplusplus
+diff --git a/config/fw_config.h b/config/fw_config.h
+index 5461269..90ff380 100644
+--- a/config/fw_config.h
++++ b/config/fw_config.h
+@@ -215,6 +215,17 @@
+ 
+ /* Регистр режима работы датчика. Пишется, чтобы войти в настройку и потом в рабочий режим. */
+ #define FW_BNO_REG_OPR_MODE 0x3Du
++/* Страница и идентификатор проверяются до/после программного сброса. */
++#define FW_BNO_REG_PAGE_ID 0x07u
++#define FW_BNO_REG_CHIP_ID 0x00u
++#define FW_BNO_CHIP_ID 0xA0u
++/* CLK_SEL, бит 7 SYS_TRIGGER: 0 — внутренний генератор, 1 — внешний кварц 32,768 кГц.
++   Включать внешний можно только при наличии кварца на соответствующем BNO055. */
++#define FW_BNO_REG_SYS_TRIGGER 0x3Fu
++#define FW_BNO_RST_SYS 0x20u
++#define FW_BNO_CLK_EXT_MASK 0x80u
++#define FW_BNO_USE_EXT_CRYSTAL_INT 0
++#define FW_BNO_USE_EXT_CRYSTAL_EXT 0
+ /* Статус калибровки: SYS, GYR, ACC, MAG по два бита. 0 — нет, 3 — готово. */
+ #define FW_BNO_REG_CALIB_STAT 0x35u
+ /* Регистр питания. Отдельной записью ставится нормальный режим. */
+@@ -273,22 +284,34 @@
+ 
+ /* Сколько ждать после отпускания сброса, пока датчик выйдет в режим настройки. Это типичное время, не максимум. */
+ #define FW_BNO_TPOR_MS 650u
++/* После RST_SYS сначала дать чипу загрузиться, затем ограниченно ждать ответа.
++   Во время самого сброса запись может завершиться без ACK. */
++#define FW_BNO_RESET_DELAY_MS 700u
++#define FW_BNO_BOOT_POLL_MS 10u
++#define FW_BNO_BOOT_TIMEOUT_MS 1000u
++/* После появления CHIP_ID дать завершиться загрузке перед настройкой. */
++#define FW_BNO_BOOT_SETTLE_MS 50u
++/* Пауза после изменения питания или источника тактирования. */
++#define FW_BNO_CONFIG_WRITE_MS 10u
+ /* Сколько ждать после команды «войти в настройку», прежде чем писать другие регистры. */
+ #define FW_BNO_CONFIG_SWITCH_MS 19u
+-/* Сколько ждать после команды «войти в рабочий режим», прежде чем проверять режим и кватернион. */
+-#define FW_BNO_OPR_SWITCH_MS 7u
+-/* Период, с которым датчик обновляет ориентацию. На инициализации с этим шагом ждём первый кватернион. */
++/* Выдержка CONFIG -> рабочий режим, как в Bosch BNO055 SensorAPI.
++   Раннее чтение через 7 мс на этой плате не подтверждало сохранение NDOF. */
++#define FW_BNO_OPR_SWITCH_MS 600u
++/* Одна повторная настройка, если после выдержки режим вернулся в CONFIG. */
++#define FW_BNO_MODE_RETRIES 1u
++/* Период, с которым датчик обновляет ориентацию. На инициализации с этим шагом опрашиваем статус. */
+ #define FW_BNO_FUSION_PERIOD_MS 10u
+-/* Сколько миллисекунд после входа в рабочий режим ждать первый ненулевой кватернион.
+-   Отдельного срока в даташите нет: 7 мс — только смена режима. На столе двух периодов по 10 мс не хватило.
+-   Предел равен типичному выходу после сброса, отдельное число не вводим. */
+-#define FW_BNO_QUAT_WAIT_MS FW_BNO_TPOR_MS
+-/* Пауза живого чтения кватерниона из главного цикла. Это не окно измерения 10 мс. */
++/* Дополнительный срок ожидания SYS_STATUS=5 после выдержки NDOF.
++   При опросе сохраняем фактические OPR_MODE/SYS_STATUS/SYS_ERR. */
++#define FW_BNO_FUSION_WAIT_MS FW_BNO_TPOR_MS
++/* Пауза живого чтения Euler из главного цикла. Это не окно измерения 10 мс. */
+ #define FW_BNO_LIVE_MS 500u
+ /* Сколько отсчётов регистра в единице кватерниона: 2^14. */
+ #define FW_BNO_QUA_ONE 16384
+ /* Байт состояния датчика. 5 — алгоритм ориентации уже считает. */
+ #define FW_BNO_REG_SYS_STATUS 0x39u
++#define FW_BNO_SYS_ERROR 1u
+ #define FW_BNO_SYS_FUSION 5u
+ /* Байт ошибки. Имеет смысл, когда статус равен 1. В текст пишем его всё равно. */
+ #define FW_BNO_REG_SYS_ERR 0x3Au
+@@ -354,11 +377,14 @@
+ #define FW_DIAG_CODE_PARAM "PARAM"       /* настройка BLE не принялась или чтение не совпало */
+ #define FW_DIAG_CODE_MOD "MOD"           /* пин MOD не остался высоким, прозрачный режим выключен */
+ #define FW_DIAG_CODE_I2C "I2C"           /* шина BNO: таймаут или ошибка чтения/записи */
+-#define FW_DIAG_CODE_MODE "MODE"         /* BNO не остался в режиме IMU */
++#define FW_DIAG_CODE_MODE "MODE"         /* BNO не остался в выбранном режиме fusion */
++#define FW_DIAG_CODE_ID "ID"             /* по адресу отвечает не BNO055 */
++#define FW_DIAG_CODE_RESET "RESET"       /* BNO055 не вышел из программного сброса */
++#define FW_DIAG_CODE_CLOCK "CLOCK"       /* CLK_SEL не совпал с конфигурацией платы */
+ #define FW_DIAG_CODE_UNIT "UNIT"         /* UNIT_SEL прочитался не тем, что записали */
+-#define FW_DIAG_CODE_QUAT "QUAT"         /* кватернион два раза подряд нулевой */
++#define FW_DIAG_CODE_QUAT "QUAT"         /* прежний код проверки ненулевого кватерниона */
+ #define FW_DIAG_CODE_MAP "MAP"           /* не два BNO или сброс не отличил внутренний от внешнего */
+-/* SYS_STATUS после входа в IMU не равен 5. */
++/* SYS_STATUS после входа в fusion не равен 5, либо SYS_ERR ненулевой. */
+ #define FW_DIAG_CODE_STATUS "STATUS"
+ /* Байт в цифровой потенциометр не ушёл. */
+ #define FW_DIAG_CODE_POT "POT"
